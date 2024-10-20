@@ -1,0 +1,17 @@
+tidyverse
+ggplot2
+tibble
+tidyr
+readr
+purrr
+dplyr
+stringr
+forcats
+lubridate
+tidycensus
+Rcpp
+brms
+broom
+StanHeaders
+rstan
+MetBrewer
