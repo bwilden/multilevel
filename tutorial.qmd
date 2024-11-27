@@ -1,6 +1,7 @@
 ---
-title: "Multilevel Modeling"
+title: "Fixed Effects and Causal Inference"
 author: "Bertrand Wilden"
+date: "November 6, 2024"
 format: html
 execute: 
   message: false
@@ -15,11 +16,18 @@ pacman::p_load(
   "tidycensus",
   "brms",
   "broom",
-  "MetBrewer"
+  "MetBrewer",
+  "ggdag",
+  "dagitty"
 )
+
+options(mc.cores = parallel::detectCores())
 ```
 
-Loading and cleaning California tract data from the 5-year ACS.
+**Does the median home value have an impact on the income inequality in a Census tract?** 
+
+The Gini Index is a [measure of income inequality](https://www.census.gov/topics/income-poverty/income-inequality/about/metrics/gini-index.html?ca_referer=https%3A%2F%2Fa.guruin.com%2F) in a region. Lower values = less inequality, higher values = more inequality.
+
 
 ```{r}
 get_ca_tracts_acs <- function(year_val) {
@@ -36,9 +44,12 @@ get_ca_tracts_acs <- function(year_val) {
     mutate(NAME = str_remove(NAME, " County; California"),
            NAME = str_remove(NAME, "^.*?;\\s*"),
            NAME = str_remove(NAME, " County, California"),
-           NAME = str_remove(NAME, "^.*?,\\s*")) |>
+           NAME = str_remove(NAME, "^.*?,\\s*"),
+           median_home_val100k = median_home_valE / 100000) |>
     select(county = NAME, GEOID, 
-           gini_index = gini_indexE, median_home_val = median_home_valE)
+           gini_index = gini_indexE, 
+           median_home_val = median_home_valE,
+           median_home_val100k)
   
   return(acs_year)
 }
@@ -46,9 +57,153 @@ ca_tracts <- get_ca_tracts_acs(2022)
 ```
 
 
-# Fixed Effects vs Raw Averages
+Loading and cleaning California tract data from the 5-year ACS.
 
-Calculating county-level Gini Index averages from tracts. The Gini Index is a [measure of income inequality](https://www.census.gov/topics/income-poverty/income-inequality/about/metrics/gini-index.html?ca_referer=https%3A%2F%2Fa.guruin.com%2F) in a region. Lower values = less inequality, higher values = more inequality.
+
+# To Pool or Not to Pool?
+
+```{r}
+#| include: false
+ca_cors <- tibble()
+for (county_name in unique(ca_tracts$county)) {
+  df <- ca_tracts |> 
+    filter(county == county_name) |> 
+    na.omit()
+  ca_cors <- rbind(
+    ca_cors,
+    tibble(county = county_name,
+           corr = cor(df$gini_index, df$median_home_val))
+  )
+}
+ca_cors |> 
+  arrange(desc(corr)) |> 
+  print(n = 58)
+```
+
+
+```{r}
+ca_3 <- ca_tracts |> 
+  filter(county %in% c("San Benito", "Mono", "Humboldt"))
+```
+
+First we will take a look at the data for three counties and inspect whether there might be a relationship between median home values and the Gini Index.
+
+::: {.panel-tabset}
+
+## Pooled Data
+
+```{r}
+#| code-fold: true
+#| code-summary: "Plot Code"
+ca_3 |> 
+  ggplot(aes(x = median_home_val, y = gini_index)) +
+  geom_point(color = "maroon4") +
+  geom_smooth(method = "lm", se = FALSE, color = "maroon4") +
+  scale_x_continuous(labels = scales::dollar) +
+  labs(x = "Median Home Value", y = "Gini Index",
+       title = "Pooled County Relationship") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+## County-Only Data
+
+```{r}
+#| code-fold: true
+#| code-summary: "Plot Code"
+ca_3 |> 
+  ggplot(aes(x = median_home_val, y = gini_index, color = county)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_x_continuous(labels = scales::dollar) +
+  scale_color_manual(values = met.brewer("Cross", 3)) +
+  labs(x = "Median Home Value", y = "Gini Index",
+       title = "Individual County Relationships") +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.title = element_blank())
+```
+
+:::
+
+Oh no! The relationship between the two variables is reversed depending on whether we pool all the data or whether we treat each county individually.
+
+The only way to reconcile this "paradox" is to draw the DAG and think about how each variable in the system influences the others.
+
+::: {.panel-tabset}
+
+## Counties are Ignorable
+
+```{r}
+#| code-fold: true
+#| code-summary: "Plot Code"
+dagify(
+  y ~ x,
+  x ~ z,
+  labels = c(y = "Gini Index",
+             x = "Median Home Value",
+             z = "County"),
+  coords = list(
+    x = c(y = 0, x = 1, z = 2),
+    y = c(y = 0, x = 1, z = 0)
+  )
+) |> 
+  ggplot(aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_dag_point(color = "cadetblue") +
+  geom_dag_label_repel(aes(label = label), colour = "black", show.legend = FALSE) +
+  geom_dag_edges_arc(curvature = 0) +
+  theme_dag()
+```
+
+## Counties are Confounders
+
+```{r}
+#| code-fold: true
+#| code-summary: "Plot Code"
+dagify(
+  y ~ x + z,
+  x ~ z,
+  labels = c(y = "Gini Index",
+             x = "Median Home Value",
+             z = "County"),
+  coords = list(
+    x = c(y = 0, x = 1, z = 2),
+    y = c(y = 0, x = 1, z = 0)
+  )
+) |> 
+  ggplot(aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_dag_point(color = "cadetblue") +
+  geom_dag_label_repel(aes(label = label), colour = "black", show.legend = FALSE) +
+  geom_dag_edges_arc(curvature = 0) +
+  theme_dag()
+```
+
+:::
+
+The decision to include county fixed effects is based on which DAG we think is true.
+
+::: {.panel-tabset}
+
+## Pooled Model
+
+```{r}
+lm(gini_index ~ median_home_val100k, data = ca_3) |> 
+  summary()
+```
+
+## Fixed Effects Model
+
+```{r}
+lm(gini_index ~ 0 + median_home_val100k + county, data = ca_3) |> 
+  summary()
+```
+
+:::
+
+# To Not Pool or to Partially Pool?
+
+## Fixed Effects vs Raw Averages
+
+Calculating county-level Gini Index averages from tracts.
 
 ```{r}
 raw_avgs <- ca_tracts |> 
@@ -65,7 +220,7 @@ Calculating the statewide average.
 statewide_avg <- mean(ca_tracts$gini_index, na.rm = TRUE)
 ```
 
-We can also find county-level Gini Index averages using "fixed effects" in a linear regression.
+We can also find county-level Gini Index averages using fixed effects in a linear regression.
 
 ```{r}
 fe_model <- lm(
@@ -97,7 +252,7 @@ rbind(fe_ests, raw_avgs) |>
   theme(legend.position = "none")
 ```
 
-# Fixed Effects vs Multilevel Modeling
+## Fixed Effects vs Multilevel Modeling
 
 Building a county-level multilevel model is similar to using county-level fixed effects. But Bayesian multilevel models allow information to be shared between counties when estimating what a county's likely Gini Index is. This acts to shrink estimates from small, noisy counties towards the statewide mean.
 
